@@ -31,6 +31,45 @@ interface CheckoutProps {
   onClearCart: () => void;
 }
 
+interface CashfreeOrderResponse {
+  paymentSessionId: string;
+  cashfreeOrderId: string;
+}
+
+type CashfreeMode = "sandbox" | "production";
+
+interface CashfreeCheckoutResult {
+  error?: {
+    message?: string;
+  };
+}
+
+interface CashfreeInstance {
+  checkout: (options: { paymentSessionId: string; redirectTarget: "_modal" | "_self" | "_blank" }) => Promise<CashfreeCheckoutResult>;
+}
+
+declare global {
+  interface Window {
+    Cashfree?: (options: { mode: CashfreeMode }) => CashfreeInstance;
+  }
+}
+
+const loadCashfreeScript = () => {
+  return new Promise<boolean>((resolve) => {
+    if (window.Cashfree) {
+      resolve(true);
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.src = "https://sdk.cashfree.com/js/v3/cashfree.js";
+    script.async = true;
+    script.onload = () => resolve(true);
+    script.onerror = () => resolve(false);
+    document.body.appendChild(script);
+  });
+};
+
 export default function Checkout({ cartItems, onClearCart }: CheckoutProps) {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
@@ -68,18 +107,72 @@ export default function Checkout({ cartItems, onClearCart }: CheckoutProps) {
           }))
         ),
         total: total.toString(),
-        status: "confirmed",
+        status: "created",
       };
 
-      return await apiRequest("POST", "/api/orders", orderData);
-    },
-    onSuccess: () => {
-      toast({
-        title: "Order Placed Successfully!",
-        description: "Thank you for your purchase. You will receive a confirmation email shortly.",
+      const appOrderResponse = await apiRequest("POST", "/api/orders", orderData);
+      const appOrder = await appOrderResponse.json();
+
+      const paymentOrderResponse = await apiRequest("POST", "/api/payments/create-order", {
+        amount: total,
+        currency: "INR",
+        appOrderId: appOrder.id,
+        customerName: data.customerName,
+        customerEmail: data.email,
+        customerPhone: data.phone,
       });
-      onClearCart();
-      setLocation("/");
+
+      const cashfreeOrder = (await paymentOrderResponse.json()) as CashfreeOrderResponse;
+      return { appOrder, cashfreeOrder };
+    },
+    onSuccess: async ({ appOrder, cashfreeOrder }) => {
+      const loaded = await loadCashfreeScript();
+      if (!loaded || !window.Cashfree) {
+        toast({
+          title: "Payment SDK Failed",
+          description: "Could not load Cashfree checkout. Please try again.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      const modeValue = (import.meta.env.VITE_CASHFREE_MODE || "sandbox").toLowerCase();
+      const mode: CashfreeMode = modeValue === "production" ? "production" : "sandbox";
+      const cashfree = window.Cashfree({ mode });
+
+      const result = await cashfree.checkout({
+        paymentSessionId: cashfreeOrder.paymentSessionId,
+        redirectTarget: "_modal",
+      });
+
+      if (result?.error) {
+        toast({
+          title: "Payment Failed",
+          description: result.error.message || "Payment was not completed. Please try again.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      try {
+        await apiRequest("POST", "/api/payments/verify", {
+          appOrderId: appOrder.id,
+          cashfreeOrderId: cashfreeOrder.cashfreeOrderId,
+        });
+
+        toast({
+          title: "Payment Successful",
+          description: "Your order has been confirmed.",
+        });
+        onClearCart();
+        setLocation("/");
+      } catch {
+        toast({
+          title: "Verification Pending",
+          description: "Payment may still be processing. Please refresh after a few seconds.",
+          variant: "destructive",
+        });
+      }
     },
     onError: () => {
       toast({
@@ -97,7 +190,10 @@ export default function Checkout({ cartItems, onClearCart }: CheckoutProps) {
   useEffect(() => {
     if (cartItems.length === 0) {
       setLocation("/cart");
+      return;
     }
+
+    void loadCashfreeScript();
   }, [cartItems.length, setLocation]);
 
   return (
@@ -224,8 +320,7 @@ export default function Checkout({ cartItems, onClearCart }: CheckoutProps) {
                       </h3>
                       <div className="bg-muted p-4 rounded-lg">
                         <p className="text-sm text-muted-foreground">
-                          This is a demo checkout. In production, payment gateway integration 
-                          (Stripe, Razorpay, etc.) would be implemented here.
+                          Secure payment with Cashfree (UPI, cards, netbanking, wallets).
                         </p>
                       </div>
                     </div>
@@ -243,7 +338,7 @@ export default function Checkout({ cartItems, onClearCart }: CheckoutProps) {
                           Processing Order...
                         </>
                       ) : (
-                        `Place Order - ₹${total.toFixed(2)}`
+                        `Pay INR ${total.toFixed(2)}`
                       )}
                     </Button>
                   </form>
@@ -276,7 +371,7 @@ export default function Checkout({ cartItems, onClearCart }: CheckoutProps) {
                           Qty: {item.quantity}
                         </p>
                         <p className="text-sm font-semibold" data-testid={`checkout-summary-price-${item.product.id}`}>
-                          ₹{(parseFloat(item.product.price) * item.quantity).toFixed(2)}
+                          INR {(parseFloat(item.product.price) * item.quantity).toFixed(2)}
                         </p>
                       </div>
                     </div>
@@ -288,11 +383,11 @@ export default function Checkout({ cartItems, onClearCart }: CheckoutProps) {
                 <div className="space-y-2">
                   <div className="flex justify-between text-sm">
                     <span className="text-muted-foreground">Subtotal</span>
-                    <span data-testid="checkout-summary-subtotal">₹{subtotal.toFixed(2)}</span>
+                    <span data-testid="checkout-summary-subtotal">INR {subtotal.toFixed(2)}</span>
                   </div>
                   <div className="flex justify-between text-sm">
                     <span className="text-muted-foreground">Shipping</span>
-                    <span data-testid="checkout-summary-shipping">{shipping === 0 ? "FREE" : `₹${shipping.toFixed(2)}`}</span>
+                    <span data-testid="checkout-summary-shipping">{shipping === 0 ? "FREE" : `INR ${shipping.toFixed(2)}`}</span>
                   </div>
                 </div>
 
@@ -300,7 +395,7 @@ export default function Checkout({ cartItems, onClearCart }: CheckoutProps) {
 
                 <div className="flex justify-between font-bold text-lg">
                   <span>Total</span>
-                  <span data-testid="checkout-summary-total">₹{total.toFixed(2)}</span>
+                  <span data-testid="checkout-summary-total">INR {total.toFixed(2)}</span>
                 </div>
               </CardContent>
             </Card>

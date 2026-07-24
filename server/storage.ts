@@ -7,6 +7,7 @@ export interface IStorage {
   getProduct(id: string): Promise<Product | undefined>;
   createOrder(order: InsertOrder): Promise<Order>;
   getOrder(id: string): Promise<Order | undefined>;
+  updateOrderStatus(id: string, status: string): Promise<Order | undefined>;
   createContact(contact: InsertContact): Promise<Contact>;
 }
 
@@ -133,6 +134,7 @@ export class MemStorage implements IStorage {
     const order: Order = {
       ...insertOrder,
       id,
+      status: insertOrder.status ?? "pending",
       orderDate: new Date(),
     };
     this.orders.set(id, order);
@@ -141,6 +143,20 @@ export class MemStorage implements IStorage {
 
   async getOrder(id: string): Promise<Order | undefined> {
     return this.orders.get(id);
+  }
+
+  async updateOrderStatus(id: string, status: string): Promise<Order | undefined> {
+    const existingOrder = this.orders.get(id);
+    if (!existingOrder) {
+      return undefined;
+    }
+
+    const updatedOrder: Order = {
+      ...existingOrder,
+      status,
+    };
+    this.orders.set(id, updatedOrder);
+    return updatedOrder;
   }
 
   async createContact(insertContact: InsertContact): Promise<Contact> {
